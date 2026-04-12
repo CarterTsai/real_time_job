@@ -1,0 +1,19 @@
+[project]
+name = "rocksdict-kafka-checkpoint-consumer"
+version = "0.1.0"
+description = "Kafka consumer sample using RocksDict for checkpoint state."
+requires-python = "==3.14.4"
+dependencies = [
+    "confluent-kafka==2.14.0",
+    "rocksdict==0.3.29",
+]
+
+[project.scripts]
+checkpoint-consumer = "checkpoint_consumer.app:main"
+
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
