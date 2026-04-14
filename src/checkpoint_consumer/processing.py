@@ -5,6 +5,10 @@ import json
 import time
 from typing import Any
 
+import logging
+
+LOGGER = logging.getLogger(__name__)
+
 
 def fake_process_record(
     *,
@@ -27,6 +31,8 @@ def fake_process_record(
         decoded_value = json.loads((value or b"{}").decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError):
         decoded_value = {"raw_bytes_length": len(value or b"")}
+
+    LOGGER.info("Processing record %s:%s:%s with key=%s and value=%s", topic, partition, offset, key, decoded_value)
 
     # Simulate IO/CPU work without hiding where the real logic belongs.
     time.sleep(0.005)

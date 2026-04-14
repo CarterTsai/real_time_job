@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import socket
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -39,7 +40,7 @@ class AppConfig:
             group_id=os.getenv("KAFKA_GROUP_ID", "rocksdict-checkpoint-consumer"),
             topics=topics,
             auto_offset_reset=os.getenv("KAFKA_AUTO_OFFSET_RESET", "earliest"),
-            rocksdb_path=Path(os.getenv("ROCKSDB_PATH", "./data/checkpoints")),
+            rocksdb_path=Path(os.getenv("ROCKSDB_PATH", "./data/checkpoints")) / socket.gethostname(),
             checkpoint_every_records=int(os.getenv("CHECKPOINT_EVERY_RECORDS", "1000")),
             checkpoint_every_seconds=float(os.getenv("CHECKPOINT_EVERY_SECONDS", "5")),
             commit_kafka_offsets=_env_bool("COMMIT_KAFKA_OFFSETS", False),

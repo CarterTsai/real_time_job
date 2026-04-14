@@ -5,10 +5,9 @@ ENV PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
-COPY pyproject.toml requirements.txt ./
-COPY src ./src
+COPY requirements.txt ./
 
-RUN python -m pip install --upgrade pip \
-    && python -m pip install .
+RUN python -m pip install --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
 
-CMD ["checkpoint-consumer"]
+CMD ["python", "-m", "checkpoint_consumer.app"]
