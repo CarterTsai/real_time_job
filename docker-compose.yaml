@@ -54,13 +54,15 @@ services:
       kafka:
         condition: service_healthy
 
-  consumer:
+  kafka-consumer:
+    platform: linux/amd64
+    image: kafka-consumer:0.0.1
     build:
       context: .
-    container_name: rocksdict-demo-consumer
+    container_name: kafka-consumer
     environment:
       KAFKA_BOOTSTRAP_SERVERS: kafka:29092
-      KAFKA_GROUP_ID: rocksdict-checkpoint-consumer
+      KAFKA_GROUP_ID: kafka-checkpoint-consumer
       KAFKA_TOPICS: orders
       KAFKA_AUTO_OFFSET_RESET: earliest
       ROCKSDB_PATH: /state/checkpoints

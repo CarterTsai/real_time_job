@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  creationTimestamp: null
+  name: kafka-consumer-code-pvc
+  namespace: tpebnkdmipmlt
+spec:
+  storageClassName: tpebnkdmipmlt-sc-unvskt
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 5Gi
+status: {}
