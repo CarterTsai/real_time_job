@@ -42,6 +42,7 @@ services:
         condition: service_healthy
 
   consumer:
+    platform: linux/amd64
     image: kafka-consumer:0.0.1
     build:
       context: .
@@ -63,6 +64,7 @@ services:
       - ./src/:/app
   
   consumer1:
+    platform: linux/amd64
     image: kafka-consumer:0.0.1
     build:
       context: .
