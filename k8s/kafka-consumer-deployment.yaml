@@ -17,7 +17,7 @@ spec:
           image: registry.groupt.fbt.com/tpebnkdmipmlt/kafka-consumer:0.0.1
           env:
             - name: KAFKA_BOOTSTRAP_SERVERS
-              value: "kafka:9092"
+              value: "172.16.240.151:9092,172.16.240.152:9092,172.16.240.153:9092"
             - name: KAFKA_GROUP_ID
               value: "kafka-consumer"
             - name: KAFKA_TOPICS
@@ -51,7 +51,7 @@ spec:
             claimName: kafka-consumer-rocksdb-state-pvc
         - name: kafka-consumer-code
           persistentVolumeClaim:
-            claimName: kafka-consumer-code
+            claimName: kafka-consumer-code-pvc
         - name: kafka-consumer-log
           persistentVolumeClaim:
             claimName: kafka-consumer-log-pvc
