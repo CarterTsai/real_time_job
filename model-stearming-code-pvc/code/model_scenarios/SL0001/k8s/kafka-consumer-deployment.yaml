@@ -1,0 +1,65 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kafka-consumer
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kafka-consumer
+  template:
+    metadata:
+      labels:
+        app: kafka-consumer
+    spec:
+      containers:
+        - name: kafka-consumer
+          image: registry.groupt.fbt.com/tpebnkdmipmlt/kafka-consumer:0.0.2
+          env:
+            - name: KAFKA_BOOTSTRAP_SERVERS
+              value: "172.16.240.151:9092,172.16.240.152:9092,172.16.240.153:9092"
+            - name: KAFKA_GROUP_ID
+              value: "kafka-consumer-1"
+            - name: KAFKA_TOPICS
+              value: "CCARDTD_STREAM_FINAL"
+            - name: KAFKA_AUTO_OFFSET_RESET
+              #value: "latest"
+              value: "earliest"
+            - name: ROCKSDB_PATH
+              value: "/state/checkpoints"
+            - name: CHECKPOINT_EVERY_RECORDS
+              value: "1000"
+            - name: CHECKPOINT_EVERY_SECONDS
+              value: "5"
+            - name: COMMIT_KAFKA_OFFSETS
+              value: "true"
+            - name: LOG_PATH
+              value: /opt/logs
+            - name: LOG_FILENAME
+              value: kafka-consumer
+            - name: LOG_LEVEL
+              value: INFO
+          volumeMounts:
+            - name: rocksdb-state
+              mountPath: /state
+            - name: kafka-consumer-code
+              mountPath: /app
+            - name: kafka-consumer-log
+              mountPath: /opt/logs
+          resources:
+            requests:
+              cpu: 25m
+              memory: 500Mi
+            limits:
+              cpu: 1
+              memory: 1Gi 
+      volumes:
+        - name: rocksdb-state
+          persistentVolumeClaim:
+            claimName: kafka-consumer-rocksdb-state-pvc
+        - name: kafka-consumer-code
+          persistentVolumeClaim:
+            claimName: kafka-consumer-code-pvc
+        - name: kafka-consumer-log
+          persistentVolumeClaim:
+            claimName: kafka-consumer-log-pvc

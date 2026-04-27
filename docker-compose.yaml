@@ -41,34 +41,12 @@ services:
       kafka:
         condition: service_healthy
 
-  consumer:
-    platform: linux/amd64
-    image: kafka-consumer:0.0.1
-    build:
-      context: .
-    container_name: kafka-consumer
-    environment:
-      PYTHONUNBUFFERED: "1"
-      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
-      KAFKA_GROUP_ID: kafka-consumer
-      KAFKA_TOPICS: Click
-      KAFKA_AUTO_OFFSET_RESET: earliest
-      ROCKSDB_PATH: /state/checkpoints
-      CHECKPOINT_EVERY_RECORDS: 1000
-      CHECKPOINT_EVERY_SECONDS: 5
-      COMMIT_KAFKA_OFFSETS: "true"
-      POLL_TIMEOUT_SECONDS: 1.0
-      LOG_LEVEL: INFO
-    volumes:
-      - ./consumer-state:/state
-      - ./src/:/app
-  
   consumer1:
     platform: linux/amd64
-    image: kafka-consumer:0.0.1
+    image: kafka-consumer:0.0.2
     build:
       context: .
-    container_name: kafka-consumer1
+    container_name: SL0001
     environment:
       PYTHONUNBUFFERED: "1"
       KAFKA_BOOTSTRAP_SERVERS: kafka:29092
@@ -81,9 +59,33 @@ services:
       COMMIT_KAFKA_OFFSETS: "true"
       POLL_TIMEOUT_SECONDS: 1.0
       LOG_LEVEL: INFO
+      CONSUMER_PROCESS: SL0001
     volumes:
       - ./consumer-state:/state
-      - ./src/:/app
+      - ./model-stearming-code-pvc/code/:/app
+
+  consumer2:
+    platform: linux/amd64
+    image: kafka-consumer:0.0.2
+    build:
+      context: .
+    container_name: SL0002
+    environment:
+      PYTHONUNBUFFERED: "1"
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      KAFKA_GROUP_ID: kafka-consumer
+      KAFKA_TOPICS: Click
+      KAFKA_AUTO_OFFSET_RESET: earliest
+      ROCKSDB_PATH: /state/checkpoints
+      CHECKPOINT_EVERY_RECORDS: 1000
+      CHECKPOINT_EVERY_SECONDS: 5
+      COMMIT_KAFKA_OFFSETS: "true"
+      POLL_TIMEOUT_SECONDS: 1.0
+      LOG_LEVEL: INFO
+      CONSUMER_PROCESS: SK0002
+    volumes:
+      - ./consumer-state:/state
+      - ./model-stearming-code-pvc/code/:/app
 
 volumes:
   consumer-state:

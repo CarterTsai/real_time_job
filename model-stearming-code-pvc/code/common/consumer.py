@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-from re import L
 import signal
 import time
 from dataclasses import dataclass
@@ -9,9 +8,9 @@ from typing import Any
 
 from confluent_kafka import Consumer, KafkaException, Message, TopicPartition
 
-from checkpoint_consumer.config import AppConfig
-from checkpoint_consumer.processing import fake_process_record
-from checkpoint_consumer.state import PartitionState, RocksCheckpointStore
+from common.base import ProcessorProtocol
+from common.config import AppConfig
+from common.state import PartitionState, RocksCheckpointStore
 
 LOGGER = logging.getLogger(__name__)
 
@@ -25,8 +24,9 @@ class PendingCheckpoint:
 
 
 class CheckpointedConsumer:
-    def __init__(self, config: AppConfig) -> None:
+    def __init__(self, config: AppConfig, processor: ProcessorProtocol) -> None:
         self.config = config
+        self._processor = processor
         self.config.rocksdb_path.mkdir(parents=True, exist_ok=True)
         self.store = RocksCheckpointStore(str(self.config.rocksdb_path))
         self.consumer = Consumer(
@@ -46,7 +46,7 @@ class CheckpointedConsumer:
 
     def run(self) -> None:
         """啟動消費者主迴圈：訂閱 Kafka topic、持續 poll 訊息，直到收到停止信號為止。"""
-        LOGGER.info("Starting consumer with config: %s", self.config)
+        LOGGER.debug("Starting consumer with config: %s", self.config)
         self._install_signal_handlers()
         self.consumer.subscribe(
             self.config.topics,
@@ -54,7 +54,7 @@ class CheckpointedConsumer:
             on_revoke=self._on_revoke,
             on_lost=self._on_lost,
         )
-        LOGGER.info("Consumer started. topics=%s group_id=%s", self.config.topics, self.config.group_id)
+        LOGGER.debug("Consumer started. topics=%s group_id=%s", self.config.topics, self.config.group_id)
 
         try:
             while self._running:
@@ -67,14 +67,14 @@ class CheckpointedConsumer:
                 self._handle_message(message)
                 self._flush_if_due()
         finally:
-            LOGGER.info("Shutting down consumer")
+            LOGGER.debug("Shutting down consumer")
             self._flush(force=True)
             self.consumer.close()
             self.store.close()
 
     def _handle_message(self, message: Message) -> None:
         """處理單一 Kafka 訊息：呼叫業務邏輯取得中間狀態，並記錄到 pending 等待 flush。"""
-        LOGGER.info("C_handle_message. message=%s", message)
+        LOGGER.debug("C_handle_message. message=%s", message)
         topic = message.topic()
         partition = message.partition()
         offset = message.offset()
@@ -86,7 +86,7 @@ class CheckpointedConsumer:
             else (self._active_states.get(state_key).intermediate_state if state_key in self._active_states else None)
         )
 
-        intermediate_state = fake_process_record(
+        intermediate_state = self._processor(
             topic=topic,
             partition=partition,
             offset=offset,
@@ -133,23 +133,23 @@ class CheckpointedConsumer:
         self._pending.clear()
         self._records_since_flush = 0
         self._last_flush_time = time.monotonic()
-        LOGGER.info("Flushed %d RocksDB checkpoint(s)", len(committed_states))
+        LOGGER.debug("Flushed %d RocksDB checkpoint(s)", len(committed_states))
 
         if self.config.commit_kafka_offsets:
             offsets = [self.store.topic_partition_for_commit(state) for state in committed_states]
             self.consumer.commit(offsets=offsets, asynchronous=False)
-            LOGGER.info("Committed %d Kafka offset(s) manually", len(offsets))
+            LOGGER.debug("Committed %d Kafka offset(s) manually", len(offsets))
 
     def _on_assign(self, consumer: Consumer, partitions: list[TopicPartition]) -> None:
         """Rebalance 完成分配時呼叫：從 RocksDB 讀取 checkpoint，將 offset seek 至上次記錄位置後再 assign。"""
-        LOGGER.info("Partitions assigned: %s", partitions)
+        LOGGER.debug("Partitions assigned: %s", partitions)
         partitions_to_assign: list[TopicPartition] = []
         for partition in partitions:
             state = self.store.load(partition.topic, partition.partition)
             if state is not None:
                 partition.offset = state.next_offset
                 self._active_states[(state.topic, state.partition)] = state
-                LOGGER.info(
+                LOGGER.debug(
                     "Seeking %s-%s to RocksDB checkpoint offset %s",
                     state.topic,
                     state.partition,
@@ -160,7 +160,7 @@ class CheckpointedConsumer:
 
     def _on_revoke(self, consumer: Consumer, partitions: list[TopicPartition]) -> None:
         """Rebalance 正常撤銷 partition 前呼叫：強制 flush 未提交狀態，並清除這些 partition 的 pending 與 active state。"""
-        LOGGER.info("Partitions revoked: %s", partitions)
+        LOGGER.debug("Partitions revoked: %s", partitions)
         self._flush(force=True)
         for partition in partitions:
             self._pending.pop((partition.topic, partition.partition), None)

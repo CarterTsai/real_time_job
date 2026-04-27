@@ -29,7 +29,7 @@ class AppConfig:
     def from_env(cls) -> "AppConfig":
         topics = [
             topic.strip()
-            for topic in os.getenv("KAFKA_TOPICS", "orders").split(",")
+            for topic in os.getenv("KAFKA_TOPICS", "CCARDTD_STREAM_FINAL").split(",")
             if topic.strip()
         ]
         if not topics:

@@ -2,7 +2,7 @@
 
 這是一個 Python consumer 範例，使用：
 
-- Python `3.14.4`
+- Python `3.12`（Dockerfile）／`3.14.4`（本機開發 pyproject.toml）
 - `rocksdict==0.3.29`
 - `confluent-kafka==2.14.0`
 
@@ -14,7 +14,7 @@ RocksDB 在這裡負責：
 
 - Offset 管理：記錄每個 `topic + partition` 已安全處理完成後的 `next_offset`
 - Checkpoint：每 N 筆或每 X 秒保存安全點
-- 中間狀態：保存 fake processing function 回傳的 state
+- 中間狀態：保存 processing function 回傳的 state
 
 多個 pod 讀同一個 topic 時，請使用相同 `group.id`。Kafka 會把同一個 consumer group 內的 partition 分配給不同 pod；同一個 partition 同時間只會由其中一個 pod 消費。
 
@@ -26,7 +26,29 @@ RocksDB 在這裡負責：
 
 此範例預設 `COMMIT_KAFKA_OFFSETS=false`，符合「不依賴 Kafka auto.commit」。要支援多 pod rebalance 更穩定，建議在部署時改為 `true`；這仍然是手動 commit，不是 auto commit。
 
-## 安裝
+## 專案結構
+
+```
+model-stearming-code-pvc/code/       # container 內掛載至 /app
+├── common/                           # 共用框架層
+│   ├── base.py                       # ProcessorProtocol 介面定義
+│   ├── config.py                     # Kafka / RocksDB 設定（從環境變數讀取）
+│   ├── consumer.py                   # Kafka poll + RocksDB checkpoint 核心邏輯
+│   └── state.py                      # RocksDB state store（PartitionState / RocksCheckpointStore）
+│
+├── service/                          # 服務啟動層
+│   └── app.py                        # 入口：讀 CONSUMER_PROCESS 動態載入對應 processing
+│
+└── model_scenarios/                  # 各業務場景（每個目錄為獨立專案）
+    ├── SL0001/
+    │   └── processing.py             # 信用卡即時推播邏輯，實作 ProcessorProtocol
+    └── streaming/
+        └── SCXXXXX/                  # 新場景範本（複製此目錄作為起點）
+            ├── app.py
+            └── processing.py
+```
+
+## 安裝（本機開發）
 
 ```powershell
 py -3.14 -m venv .venv
@@ -35,40 +57,47 @@ python -m pip install --upgrade pip
 python -m pip install -e .
 ```
 
-## 設定
-
-複製 `.env.example` 後設定環境變數，或直接在 shell 設定：
+安裝後可直接執行：
 
 ```powershell
-$env:KAFKA_BOOTSTRAP_SERVERS="localhost:9092"
-$env:KAFKA_GROUP_ID="rocksdict-checkpoint-consumer"
-$env:KAFKA_TOPICS="orders"
-$env:ROCKSDB_PATH="./data/checkpoints"
-$env:CHECKPOINT_EVERY_RECORDS="1000"
-$env:CHECKPOINT_EVERY_SECONDS="5"
-$env:COMMIT_KAFKA_OFFSETS="false"
+$env:CONSUMER_PROCESS="SL0001"
+consumer
 ```
 
-## 執行
+或不安裝直接跑：
 
 ```powershell
-python -m checkpoint_consumer.app
+cd model-stearming-code-pvc/code
+python -m service.app
 ```
 
-或安裝成 package 後執行：
+## 環境變數
 
-```powershell
-checkpoint-consumer
-```
+| 變數 | 說明 | 預設值 |
+|------|------|--------|
+| `CONSUMER_PROCESS` | 要載入的 model_scenarios 目錄名稱 | **必填** |
+| `KAFKA_BOOTSTRAP_SERVERS` | Kafka broker 位址 | `localhost:9092` |
+| `KAFKA_GROUP_ID` | Consumer group ID | `rocksdict-checkpoint-consumer` |
+| `KAFKA_TOPICS` | 訂閱的 topic，逗號分隔 | `CCARDTD_STREAM_FINAL` |
+| `KAFKA_AUTO_OFFSET_RESET` | offset 重置策略 | `earliest` |
+| `ROCKSDB_PATH` | RocksDB 存放目錄 | `./data/checkpoints` |
+| `CHECKPOINT_EVERY_RECORDS` | 每幾筆 flush 一次 | `1000` |
+| `CHECKPOINT_EVERY_SECONDS` | 每幾秒 flush 一次 | `5` |
+| `COMMIT_KAFKA_OFFSETS` | 是否同步手動 commit Kafka offset | `false` |
+| `POLL_TIMEOUT_SECONDS` | Kafka poll 等待時間 | `1.0` |
+
+各 process 可在自己的 `processing.py` 內讀取專屬環境變數。
 
 ## Docker Compose
 
-這個 repo 也包含 `docker-compose.yaml`，會啟動：
+`docker-compose.yaml` 會啟動以下服務：
 
-- Kafka：container 內使用 `kafka:29092`，本機使用 `localhost:9092`
-- Kafka init job：先建立 `orders` topic，避免 consumer 比 topic 更早啟動
-- AKHQ：http://localhost:8080
-- Python consumer：使用同一份 Dockerfile build，讀取 `orders` topic
+| 服務 | 說明 |
+|------|------|
+| `kafka` | KRaft 模式的 Kafka broker，container 內 `kafka:29092`，本機 `localhost:9092` |
+| `akhq` | Kafka UI，http://localhost:8080 |
+| `consumer` | kafka-consumer container，訂閱 `Click` topic，`CONSUMER_PROCESS=SL0001` |
+| `consumer1` | 同上，與 `consumer` 同一個 group，Kafka 自動分配 partition |
 
 啟動：
 
@@ -79,32 +108,65 @@ docker compose up --build
 送一筆測試資料：
 
 ```powershell
-docker compose exec kafka kafka-console-producer --bootstrap-server kafka:29092 --topic orders
+docker compose exec kafka kafka-console-producer --bootstrap-server kafka:29092 --topic Click
 ```
 
 輸入一行 JSON 後按 Enter：
 
 ```json
-{"order_id":"demo-1","amount":123}
+{"card_id":"demo-1","amount":123}
 ```
 
 查看 consumer log：
 
 ```powershell
 docker compose logs -f consumer
+docker compose logs -f consumer1
 ```
 
-## 處理資料的位置
+## 多 Process 架構（Plugin 設計）
 
-目前資料處理在 `src/checkpoint_consumer/processing.py` 的 `fake_process_record()`。替換這個 function 即可接上真正的 business logic。
+`common/` 為共用框架，業務邏輯由各 `model_scenarios/` 目錄自行定義。`service/app.py` 在啟動時讀取 `CONSUMER_PROCESS` 環境變數，動態 import 對應的 `processing.py`：
 
-這個 function 回傳的 dict 會被當成 partition 的中間狀態，和 offset 一起寫入 RocksDB。
+```
+CONSUMER_PROCESS=SL0001  →  model_scenarios.SL0001.processing.process_record
+CONSUMER_PROCESS=SL0002  →  model_scenarios.SL0002.processing.process_record
+```
+
+### 新增一個 process
+
+1. 在 `model_scenarios/` 下建立新目錄，例如 `SL0002/`
+2. 新增 `__init__.py` 和 `processing.py`，實作符合 `ProcessorProtocol` 的 `process_record` function
+3. k8s Deployment 或 docker-compose 設定 `CONSUMER_PROCESS=SL0002`
+
+### K8s 水平擴展
+
+- 每個 process 對應一個獨立的 k8s Deployment
+- 同一個 Deployment 可開多個 replica，Kafka consumer group 自動分配 partition
+- 不同 Deployment 使用不同 `KAFKA_GROUP_ID`
+
+### `process_record` 介面
+
+```python
+def process_record(
+    *,
+    topic: str,
+    partition: int,
+    offset: int,
+    key: bytes | None,
+    value: bytes | None,
+    previous_state: dict[str, Any] | None,
+) -> dict[str, Any]:
+    ...
+```
+
+回傳的 dict 會作為中間狀態與 offset 一起寫入 RocksDB checkpoint。
 
 ## Checkpoint 格式
 
 RocksDB key：
 
-```text
+```
 checkpoint:{topic}:{partition}
 ```
 
@@ -112,7 +174,7 @@ Value 是 JSON：
 
 ```json
 {
-  "topic": "orders",
+  "topic": "Click",
   "partition": 0,
   "next_offset": 1235,
   "intermediate_state": {
@@ -126,9 +188,7 @@ Value 是 JSON：
 
 ## Kubernetes 多 pod 提醒
 
-範例部署時要確保：
-
 - 所有 pod 使用相同 `KAFKA_GROUP_ID`
-- pod 數量不要期待超過 topic partition 數還能提升吞吐量；同一個 consumer group 的最大平行度是 partition 數
-- `ROCKSDB_PATH` 在容器內應該指到可寫目錄
-- 如果依賴 RocksDB checkpoint 做 restart/rebalance recovery，請使用 persistent volume 或搭配 `COMMIT_KAFKA_OFFSETS=true`
+- pod 數量超過 topic partition 數不會增加吞吐量；同一個 consumer group 最大平行度是 partition 數
+- `ROCKSDB_PATH` 在容器內應指到可寫目錄（建議掛 persistent volume）
+- 如果依賴 RocksDB checkpoint 做 restart/rebalance recovery，請搭配 `COMMIT_KAFKA_OFFSETS=true`

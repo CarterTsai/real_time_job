@@ -14,15 +14,16 @@ spec:
     spec:
       containers:
         - name: kafka-consumer
-          image: registry.groupt.fbt.com/tpebnkdmipmlt/kafka-consumer:0.0.1
+          image: registry.groupt.fbt.com/tpebnkdmipmlt/kafka-consumer:0.0.2
           env:
             - name: KAFKA_BOOTSTRAP_SERVERS
               value: "172.16.240.151:9092,172.16.240.152:9092,172.16.240.153:9092"
             - name: KAFKA_GROUP_ID
-              value: "kafka-consumer"
+              value: "kafka-consumer-1"
             - name: KAFKA_TOPICS
-              value: "orders"
+              value: "CCARDTD_STREAM_FINAL"
             - name: KAFKA_AUTO_OFFSET_RESET
+              #value: "latest"
               value: "earliest"
             - name: ROCKSDB_PATH
               value: "/state/checkpoints"
@@ -37,7 +38,7 @@ spec:
             - name: LOG_FILENAME
               value: kafka-consumer
             - name: LOG_LEVEL
-              value: DEBUG
+              value: INFO
           volumeMounts:
             - name: rocksdb-state
               mountPath: /state
@@ -45,6 +46,13 @@ spec:
               mountPath: /app
             - name: kafka-consumer-log
               mountPath: /opt/logs
+          resources:
+            requests:
+              cpu: 25m
+              memory: 500Mi
+            limits:
+              cpu: 1
+              memory: 1Gi 
       volumes:
         - name: rocksdb-state
           persistentVolumeClaim:
