@@ -56,7 +56,7 @@ services:
 
   consumer1:
     platform: linux/amd64
-    image: kafka-consumer:0.0.2
+    image: kafka-consumer:0.0.3
     build:
       context: .
     container_name: SL0001
@@ -82,7 +82,7 @@ services:
 
   consumer2:
     platform: linux/amd64
-    image: kafka-consumer:0.0.2
+    image: kafka-consumer:0.0.3
     build:
       context: .
     container_name: SL0002

@@ -2,7 +2,7 @@ apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   creationTimestamp: null
-  name: kafka-consumer-log-pvc
+  name: model-stearming-log-pvc
   namespace: tpebnkdmipmlt
 spec:
   storageClassName: tpebnkdmipmlt-sc-unvskt

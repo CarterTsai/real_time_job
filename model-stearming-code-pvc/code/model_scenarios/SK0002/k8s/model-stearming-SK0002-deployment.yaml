@@ -1,25 +1,25 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: kafka-consumer
+  name: model-stearming-SK0002
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: kafka-consumer
+      app: model-stearming-SK0002
   template:
     metadata:
       labels:
-        app: kafka-consumer
+        app: model-stearming-SK0002
     spec:
       containers:
-        - name: kafka-consumer
-          image: registry.groupt.fbt.com/tpebnkdmipmlt/kafka-consumer:0.0.2
+        - name: model-stearming-SK0002
+          image: registry.groupt.fbt.com/tpebnkdmipmlt/kafka-consumer:0.0.3
           env:
             - name: KAFKA_BOOTSTRAP_SERVERS
               value: "172.16.240.151:9092,172.16.240.152:9092,172.16.240.153:9092"
             - name: KAFKA_GROUP_ID
-              value: "kafka-consumer-1"
+              value: "model-stearming-SK0002"
             - name: KAFKA_TOPICS
               value: "CCARDTD_STREAM_FINAL"
             - name: KAFKA_AUTO_OFFSET_RESET
@@ -33,18 +33,20 @@ spec:
               value: "5"
             - name: COMMIT_KAFKA_OFFSETS
               value: "true"
+            - name: POLL_TIMEOUT_SECONDS
+              value: "1.0"
             - name: LOG_PATH
               value: /opt/logs
             - name: LOG_FILENAME
-              value: kafka-consumer
+              value: model-stearming-SK0002
             - name: LOG_LEVEL
               value: INFO
           volumeMounts:
             - name: rocksdb-state
               mountPath: /state
-            - name: kafka-consumer-code
+            - name: model-stearming-code
               mountPath: /app
-            - name: kafka-consumer-log
+            - name: model-stearming-log
               mountPath: /opt/logs
           resources:
             requests:
@@ -56,10 +58,10 @@ spec:
       volumes:
         - name: rocksdb-state
           persistentVolumeClaim:
-            claimName: kafka-consumer-rocksdb-state-pvc
-        - name: kafka-consumer-code
+            claimName: model-stearming-rocksdb-state-pvc
+        - name: model-stearming-code
           persistentVolumeClaim:
-            claimName: kafka-consumer-code-pvc
-        - name: kafka-consumer-log
+            claimName: model-stearming-code-pvc
+        - name: model-stearming-log
           persistentVolumeClaim:
-            claimName: kafka-consumer-log-pvc
+            claimName: model-stearming-log-pvc
