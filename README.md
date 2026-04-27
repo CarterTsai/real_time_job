@@ -95,9 +95,10 @@ python -m service.app
 | 服務 | 說明 |
 |------|------|
 | `kafka` | KRaft 模式的 Kafka broker，container 內 `kafka:29092`，本機 `localhost:9092` |
+| `kafka-init` | 一次性 job，建立 `Click` topic（2 partitions），確保 consumer 啟動前 topic 已存在 |
 | `akhq` | Kafka UI，http://localhost:8080 |
-| `consumer` | kafka-consumer container，訂閱 `Click` topic，`CONSUMER_PROCESS=SL0001` |
-| `consumer1` | 同上，與 `consumer` 同一個 group，Kafka 自動分配 partition |
+| `consumer1` | kafka-consumer container，訂閱 `Click` topic，`CONSUMER_PROCESS=SL0001` |
+| `consumer2` | 同上，與 `consumer1` 同一個 group，Kafka 自動分配不同 partition |
 
 啟動：
 
@@ -120,9 +121,47 @@ docker compose exec kafka kafka-console-producer --bootstrap-server kafka:29092 
 查看 consumer log：
 
 ```powershell
-docker compose logs -f consumer
 docker compose logs -f consumer1
+docker compose logs -f consumer2
 ```
+
+## Consumer Group 分配機制
+
+Kafka 以 **partition** 為最小分配單位，同一個 consumer group 裡每個 partition 同時間只會交給一個 consumer 處理，因此多個 consumer 使用相同 `KAFKA_GROUP_ID` 就能自動切割資料、不重複消費。
+
+```
+Topic: Click（2 partitions）
+                    ┌──────────────────────────────────┐
+                    │   KAFKA_GROUP_ID: kafka-consumer  │
+                    │                                  │
+Partition 0 ───────▶│  consumer1 (SL0001)              │
+Partition 1 ───────▶│  consumer2 (SK0002)              │
+                    └──────────────────────────────────┘
+```
+
+### 分配規則
+
+| 情況 | 結果 |
+|------|------|
+| consumer 數 = partition 數 | 每個 consumer 負責一個 partition（最佳） |
+| consumer 數 < partition 數 | 部分 consumer 負責多個 partition |
+| consumer 數 > partition 數 | 多出來的 consumer 閒置待命（rebalance 時頂上） |
+
+### 為什麼需要 kafka-init
+
+`KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"` 讓 Kafka 在 consumer 第一次訂閱時自動建立 topic，但**預設只有 1 個 partition**。兩個 consumer 搶同一個 partition，只有一個能消費，另一個閒置。
+
+`kafka-init` 在 consumer 啟動前先以 `--partitions 2` 建好 topic，確保兩個 consumer 都能分配到獨立的 partition。
+
+擴充 consumer 數量時，需同步調整 `kafka-init` 的 `--partitions`：
+
+```yaml
+kafka-topics ... --topic Click --partitions <consumer 數量>
+```
+
+### 不同 Group 的行為（對照）
+
+如果兩個 consumer 使用**不同** `KAFKA_GROUP_ID`，Kafka 會把完整的 topic 資料各自推送給每個 group，兩邊都會收到全量資料。這適合「同一份資料給不同系統各自處理」的場景，但在同一個服務裡多開 replica 時要避免。
 
 ## 多 Process 架構（Plugin 設計）
 

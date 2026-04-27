@@ -25,6 +25,19 @@ services:
       timeout: 10s
       retries: 10
 
+  kafka-init:
+    image: confluentinc/cp-kafka:7.8.0
+    container_name: rocksdict-demo-kafka-init
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists \
+          --topic Click --partitions 2 --replication-factor 1
+    restart: "no"
+
   akhq:
     image: tchiotludo/akhq:0.26.0
     container_name: rocksdict-demo-akhq
@@ -47,6 +60,9 @@ services:
     build:
       context: .
     container_name: SL0001
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
     environment:
       PYTHONUNBUFFERED: "1"
       KAFKA_BOOTSTRAP_SERVERS: kafka:29092
@@ -70,6 +86,9 @@ services:
     build:
       context: .
     container_name: SL0002
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
     environment:
       PYTHONUNBUFFERED: "1"
       KAFKA_BOOTSTRAP_SERVERS: kafka:29092
