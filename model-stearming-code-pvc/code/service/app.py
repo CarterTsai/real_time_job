@@ -9,7 +9,7 @@ from common.base import ProcessorProtocol
 from common.config import AppConfig
 from common.consumer import CheckpointedConsumer
 
-
+# import個情境寫好的processing.py
 def _load_processor(process_name: str) -> ProcessorProtocol:
     module = importlib.import_module(f"model_scenarios.{process_name}.processing")
     processor = getattr(module, "process_record", None)

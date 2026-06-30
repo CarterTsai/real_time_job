@@ -4,6 +4,8 @@ import hashlib
 import json
 import logging
 from typing import Any
+import os
+import uuid
 
 LOGGER = logging.getLogger(__name__)
 
@@ -19,22 +21,25 @@ def process_record(
 ) -> dict[str, Any]:
     previous_count = int((previous_state or {}).get("processed_count", 0))
     value_digest = hashlib.sha256(value or b"").hexdigest()
+    scenario = os.environ.get("CONSUMER_PROCESS")   
+    uid = str(uuid.uuid4())
 
     try:
-        LOGGER.info("[即時資料][kfk] 取得信卡交易資料")
+        LOGGER.info("[{scenario}][{uid}][]--[即時資料][kfk] 取得信卡交易資料")
         decoded_value = json.loads((value or b"{}").decode("utf-8"))
-        LOGGER.info(f"[即時資料][kfk] 交易資料 : {decoded_value}")
+        cust_id = decoded_value.get("ACID")
+        LOGGER.info(f"[{scenario}][{uid}][{cust_id}]--[即時資料][kfk] 交易資料 : {decoded_value}")
 
-        LOGGER.info(f"[kfk Consumer][靜態條件檢核] 符合可推播名單")
+        LOGGER.info(f"[{scenario}][{uid}][{cust_id}]--[kfk Consumer][靜態條件檢核] 符合可推播名單")
 
-        LOGGER.info(f"[Model Function][model] call model")
-        LOGGER.info(f"[Model Function][model] model回傳結果 : id : , score : ")
-        LOGGER.info(f"[Model Function][model] model end")
+        LOGGER.info(f"[{scenario}][{uid}][{cust_id}]--[Model Function][model] call model")
+        LOGGER.info(f"[{scenario}][{uid}][{cust_id}]--[Model Function][model] model回傳結果 : id : , score : ")
+        LOGGER.info(f"[{scenario}][{uid}][{cust_id}]--[Model Function][model] model end")
 
-        LOGGER.info(f"[contact檢核][推播檢核] 近2天無推播")
+        LOGGER.info(f"[{scenario}][{uid}][{cust_id}]--[contact檢核][推播檢核] 近2天無推播")
 
-        LOGGER.info(f"[推播][寫入推播紀錄] 寫入redis")
-        LOGGER.info(f"[推播][寫入推播紀錄] 寫入kfk")
+        LOGGER.info(f"[{scenario}][{uid}][{cust_id}]--[推播][寫入推播紀錄] 寫入redis")
+        LOGGER.info(f"[{scenario}][{uid}][{cust_id}]--[推播][寫入推播紀錄] 寫入kfk")
     except (UnicodeDecodeError, json.JSONDecodeError):
         decoded_value = {"raw_bytes_length": len(value or b"")}
 

@@ -1,25 +1,25 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: model-stearming-SL0001
+  name: model-stearming-sl0001
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: model-stearming-SL0001
+      app: model-stearming-sl0001
   template:
     metadata:
       labels:
-        app: model-stearming-SL0001
+        app: model-stearming-sl0001
     spec:
       containers:
-        - name: model-stearming-SL0001
-          image: registry.groupt.fbt.com/tpebnkdmipmlt/kafka-consumer:0.0.3
+        - name: model-stearming-sl0001
+          image: registry.groupt.fbt.com/tpebnkdmipmlt/kafka-consumer:0.0.4
           env:
             - name: KAFKA_BOOTSTRAP_SERVERS
               value: "172.16.240.151:9092,172.16.240.152:9092,172.16.240.153:9092"
             - name: KAFKA_GROUP_ID
-              value: "model-stearming-SL0001"
+              value: "model-stearming-sl0001"
             - name: KAFKA_TOPICS
               value: "CCARDTD_STREAM_FINAL"
             - name: KAFKA_AUTO_OFFSET_RESET
@@ -38,7 +38,7 @@ spec:
             - name: LOG_PATH
               value: /opt/logs
             - name: LOG_FILENAME
-              value: model-stearming-SL0001
+              value: model-stearming-sl0001
             - name: LOG_LEVEL
               value: INFO
             - name: CONSUMER_PROCESS

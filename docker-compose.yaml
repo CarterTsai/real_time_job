@@ -56,7 +56,7 @@ services:
 
   consumer1:
     platform: linux/amd64
-    image: kafka-consumer:0.0.3
+    image: kafka-consumer:0.0.4
     build:
       context: .
     container_name: SL0001
@@ -78,11 +78,11 @@ services:
       CONSUMER_PROCESS: SL0001
     volumes:
       - ./consumer-state:/state
-      - ./model-stearming-code-pvc/code/:/app
+      - ./model-stearming-code-pvc/code/:/app/code
 
   consumer2:
     platform: linux/amd64
-    image: kafka-consumer:0.0.3
+    image: kafka-consumer:0.0.4
     build:
       context: .
     container_name: SL0002
@@ -104,7 +104,7 @@ services:
       CONSUMER_PROCESS: SK0002
     volumes:
       - ./consumer-state:/state
-      - ./model-stearming-code-pvc/code/:/app
+      - ./model-stearming-code-pvc/code/:/app/code
 
 volumes:
   consumer-state:
