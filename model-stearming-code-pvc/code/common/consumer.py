@@ -2,13 +2,17 @@ from __future__ import annotations
 
 import logging
 import signal
+import threading
 import time
+from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any
 
 from confluent_kafka import Consumer, KafkaException, Message, TopicPartition
 
 from common.base import (
+    BatchProcessorProtocol,
     ContactPolicyProtocol,
     DataHandleAfterProtocol,
     DataHandleBeforeProtocol,
@@ -34,12 +38,14 @@ class CheckpointedConsumer:
         config: AppConfig,
         processor: ProcessorProtocol,
         *,
+        batch_processor: BatchProcessorProtocol | None = None,
         data_handle_before: DataHandleBeforeProtocol | None = None,
         contact_policy: ContactPolicyProtocol | None = None,
         data_handle_after: DataHandleAfterProtocol,
     ) -> None:
         self.config = config
         self._processor = processor
+        self._batch_processor = batch_processor
         self._data_handle_before = data_handle_before
         self._contact_policy = contact_policy
         self._data_handle_after = data_handle_after
@@ -60,9 +66,15 @@ class CheckpointedConsumer:
         self._records_since_flush = 0
         self._last_flush_time = time.monotonic()
         self._active_states: dict[tuple[str, int], PartitionState] = {}
+        # 保護 _pending / _active_states / _records_since_flush 的並行寫入
+        self._lock = threading.Lock()
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # 主迴圈
+    # ──────────────────────────────────────────────────────────────────────────
 
     def run(self) -> None:
-        """啟動消費者主迴圈：訂閱 Kafka topic、持續 poll 訊息，直到收到停止信號為止。"""
+        """主迴圈：一次 consume BATCH_SIZE 筆，按 partition 分組後並行處理。"""
         LOGGER.debug("Starting consumer with config: %s", self.config)
         self._install_signal_handlers()
         self.consumer.subscribe(
@@ -71,17 +83,43 @@ class CheckpointedConsumer:
             on_revoke=self._on_revoke,
             on_lost=self._on_lost,
         )
-        LOGGER.debug("Consumer started. topics=%s group_id=%s", self.config.topics, self.config.group_id)
+        LOGGER.debug(
+            "Consumer started. topics=%s group_id=%s batch_size=%s",
+            self.config.topics, self.config.group_id, self.config.batch_size,
+        )
 
         try:
             while self._running:
-                message = self.consumer.poll(self.config.poll_timeout_seconds)
-                if message is None:
+                messages = self.consumer.consume(
+                    num_messages=self.config.batch_size,
+                    timeout=self.config.poll_timeout_seconds,
+                )
+                if not messages:
                     self._flush_if_due(force_time_check=True)
                     continue
-                if message.error():
-                    raise KafkaException(message.error())
-                self._handle_message(message)
+
+                for msg in messages:
+                    if msg.error():
+                        raise KafkaException(msg.error())
+
+                # 按 (topic, partition) 分組，維持各 partition 內部順序
+                partition_groups: dict[tuple[str, int], list[Message]] = defaultdict(list)
+                for msg in messages:
+                    partition_groups[(msg.topic(), msg.partition())].append(msg)
+
+                if len(partition_groups) == 1:
+                    # 單一 partition：不開 thread，省去 overhead
+                    self._handle_partition_batch(next(iter(partition_groups.values())))
+                else:
+                    # 多 partition：各自一個 worker，同時進行
+                    with ThreadPoolExecutor(max_workers=len(partition_groups)) as executor:
+                        futures = [
+                            executor.submit(self._handle_partition_batch, msgs)
+                            for msgs in partition_groups.values()
+                        ]
+                        for f in futures:
+                            f.result()  # 重新拋出 worker 內的 exception
+
                 self._flush_if_due()
         finally:
             LOGGER.debug("Shutting down consumer")
@@ -89,57 +127,132 @@ class CheckpointedConsumer:
             self.consumer.close()
             self.store.close()
 
-    def _handle_message(self, message: Message) -> None:
-        """四步驟編排：data_handle_before → process_record → contact_policy → data_handle_after。
-        任一步驟決定跳過時，仍 commit offset 但保留原 intermediate_state。
+    # ──────────────────────────────────────────────────────────────────────────
+    # 三 Phase 批次處理
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def _handle_partition_batch(self, messages: list[Message]) -> None:
+        """處理同一 partition 的一批訊息。
+
+        Phase 1 — data_handle_before（循序）
+            逐筆讀 previous_state、執行靜態條件檢核與資料 join。
+            Skipped 訊息記錄在 records 內，不提前寫 pending，
+            確保後續 Phase 3 按原始順序統一寫入。
+
+        Phase 2 — process_batch / process_record（批次 Model 推論）
+            有 process_batch 時，將 valid 訊息一次送 Model；
+            否則逐筆呼叫 process_record。
+            不同 partition 的 Phase 2 由 ThreadPoolExecutor 同時執行。
+
+        Phase 3 — contact_policy + data_handle_after（循序，含 skipped 訊息）
+            依原始訊息順序處理每筆（包含 skipped / contact_policy 阻擋的訊息）。
+            每筆呼叫前重新讀 latest_prev，確保 processed_count 等計數
+            在同一 batch 內正確累積。
         """
-        LOGGER.debug("_handle_message. message=%s", message)
-        topic = message.topic()
-        partition = message.partition()
-        offset = message.offset()
-        key = message.key()
-        value = message.value()
-        state_key = (topic, partition)
 
-        pending = self._pending.get(state_key)
-        previous_state: dict[str, Any] | None = (
-            pending.intermediate_state
-            if pending is not None
-            else (self._active_states[state_key].intermediate_state if state_key in self._active_states else None)
-        )
+        # ── Phase 1: data_handle_before ────────────────────────────────────
+        records: list[dict[str, Any]] = []
 
-        base_kwargs: dict[str, Any] = dict(
-            topic=topic,
-            partition=partition,
-            offset=offset,
-            key=key,
-            value=value,
-            previous_state=previous_state,
-        )
+        for msg in messages:
+            topic = msg.topic()
+            partition = msg.partition()
+            offset = msg.offset()
+            state_key = (topic, partition)
 
-        # Step 1: data_handle_before（optional）— 靜態條件檢核 + 資料 join
-        join_data: dict[str, Any] = {}
-        if self._data_handle_before is not None:
-            should_continue, join_data = self._data_handle_before(**base_kwargs)
-            if not should_continue:
-                LOGGER.debug("data_handle_before skipped. topic=%s partition=%s offset=%s", topic, partition, offset)
-                self._store_pending(state_key, topic, partition, offset, previous_state or {})
-                return
+            previous_state = self._get_previous_state(state_key)
+            base_kwargs: dict[str, Any] = dict(
+                topic=topic,
+                partition=partition,
+                offset=offset,
+                key=msg.key(),
+                value=msg.value(),
+                previous_state=previous_state,
+            )
 
-        # Step 2: process_record（required）— Model 推論
-        model_result = self._processor(**base_kwargs, join_data=join_data)
+            join_data: dict[str, Any] = {}
+            skipped = False
+            if self._data_handle_before is not None:
+                should_continue, join_data = self._data_handle_before(**base_kwargs)
+                if not should_continue:
+                    LOGGER.debug(
+                        "data_handle_before skipped. %s-%s offset=%s",
+                        topic, partition, offset,
+                    )
+                    skipped = True
 
-        # Step 3: contact_policy（optional）— 推播頻率檢核
-        if self._contact_policy is not None:
-            should_push = self._contact_policy(**base_kwargs, model_result=model_result)
-            if not should_push:
-                LOGGER.debug("contact_policy blocked push. topic=%s partition=%s offset=%s", topic, partition, offset)
-                self._store_pending(state_key, topic, partition, offset, previous_state or {})
-                return
+            records.append({
+                "state_key": state_key,
+                "topic": topic,
+                "partition": partition,
+                "offset": offset,
+                "base_kwargs": base_kwargs,
+                "join_data": join_data,
+                "skipped": skipped,
+                "model_result": None,
+            })
 
-        # Step 4: data_handle_after（required，scenario 優先，fallback 至 common）— 推播輸出
-        new_state = self._data_handle_after(**base_kwargs, model_result=model_result)
-        self._store_pending(state_key, topic, partition, offset, new_state)
+        # ── Phase 2: process_batch / process_record ────────────────────────
+        valid_records = [r for r in records if not r["skipped"]]
+
+        if valid_records:
+            if self._batch_processor is not None:
+                # 批次推論：一次送所有 valid 訊息給 Model
+                batch_input = [
+                    {**r["base_kwargs"], "join_data": r["join_data"]}
+                    for r in valid_records
+                ]
+                model_results = self._batch_processor(batch=batch_input)
+            else:
+                # 逐筆推論：BATCH_SIZE=1 或 scenario 未實作 process_batch 時的 fallback
+                model_results = [
+                    self._processor(**r["base_kwargs"], join_data=r["join_data"])
+                    for r in valid_records
+                ]
+            for r, result in zip(valid_records, model_results):
+                r["model_result"] = result
+
+        # ── Phase 3: contact_policy + data_handle_after ────────────────────
+        # 依原始順序（含 skipped 訊息）統一寫 pending，確保 offset 不遺漏
+        for r in records:
+            state_key = r["state_key"]
+            topic = r["topic"]
+            partition = r["partition"]
+            offset = r["offset"]
+
+            # 重新讀 latest_prev，取得本 batch 前面訊息的累積結果
+            latest_prev = self._get_previous_state(state_key)
+            step3_kwargs: dict[str, Any] = {**r["base_kwargs"], "previous_state": latest_prev}
+
+            if r["skipped"]:
+                self._store_pending(state_key, topic, partition, offset, latest_prev or {})
+                continue
+
+            model_result = r["model_result"]
+
+            if self._contact_policy is not None:
+                should_push = self._contact_policy(**step3_kwargs, model_result=model_result)
+                if not should_push:
+                    LOGGER.debug(
+                        "contact_policy blocked. %s-%s offset=%s",
+                        topic, partition, offset,
+                    )
+                    self._store_pending(state_key, topic, partition, offset, latest_prev or {})
+                    continue
+
+            new_state = self._data_handle_after(**step3_kwargs, model_result=model_result)
+            self._store_pending(state_key, topic, partition, offset, new_state)
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # Thread-safe 共用狀態存取
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def _get_previous_state(self, state_key: tuple[str, int]) -> dict[str, Any] | None:
+        with self._lock:
+            pending = self._pending.get(state_key)
+            if pending is not None:
+                return pending.intermediate_state
+            active = self._active_states.get(state_key)
+            return active.intermediate_state if active is not None else None
 
     def _store_pending(
         self,
@@ -149,16 +262,21 @@ class CheckpointedConsumer:
         offset: int,
         intermediate_state: dict[str, Any],
     ) -> None:
-        self._pending[state_key] = PendingCheckpoint(
-            topic=topic,
-            partition=partition,
-            next_offset=offset + 1,
-            intermediate_state=intermediate_state,
-        )
-        self._records_since_flush += 1
+        with self._lock:
+            self._pending[state_key] = PendingCheckpoint(
+                topic=topic,
+                partition=partition,
+                next_offset=offset + 1,
+                intermediate_state=intermediate_state,
+            )
+            self._records_since_flush += 1
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # Checkpoint flush
+    # ──────────────────────────────────────────────────────────────────────────
 
     def _flush_if_due(self, *, force_time_check: bool = False) -> None:
-        """判斷是否需要 flush：達到筆數上限或時間間隔時觸發 _flush。"""
+        """達到筆數上限或時間間隔時觸發 _flush。"""
         LOGGER.debug("Checking if flush is due, force_time_check=%s", force_time_check)
         record_limit_reached = self._records_since_flush >= self.config.checkpoint_every_records
         time_limit_reached = (time.monotonic() - self._last_flush_time) >= self.config.checkpoint_every_seconds
@@ -166,8 +284,8 @@ class CheckpointedConsumer:
             self._flush(force=False)
 
     def _flush(self, *, force: bool) -> None:
-        """將所有 pending 狀態寫入 RocksDB，並視設定同步提交 Kafka offset。force=True 時即使無 pending 也更新 flush 時間戳。"""
-        LOGGER.debug("Flushing checkpoints , force=%s", force)
+        """將所有 pending 狀態寫入 RocksDB，並視設定同步提交 Kafka offset。"""
+        LOGGER.debug("Flushing checkpoints, force=%s", force)
         if not self._pending:
             if force:
                 self._last_flush_time = time.monotonic()
@@ -195,8 +313,12 @@ class CheckpointedConsumer:
             self.consumer.commit(offsets=offsets, asynchronous=False)
             LOGGER.debug("Committed %d Kafka offset(s) manually", len(offsets))
 
+    # ──────────────────────────────────────────────────────────────────────────
+    # Rebalance callbacks
+    # ──────────────────────────────────────────────────────────────────────────
+
     def _on_assign(self, consumer: Consumer, partitions: list[TopicPartition]) -> None:
-        """Rebalance 完成分配時呼叫：從 RocksDB 讀取 checkpoint，將 offset seek 至上次記錄位置後再 assign。"""
+        """Rebalance 完成分配時：從 RocksDB 讀取 checkpoint，seek 至上次記錄位置後再 assign。"""
         LOGGER.debug("Partitions assigned: %s", partitions)
         partitions_to_assign: list[TopicPartition] = []
         for partition in partitions:
@@ -206,15 +328,13 @@ class CheckpointedConsumer:
                 self._active_states[(state.topic, state.partition)] = state
                 LOGGER.debug(
                     "Seeking %s-%s to RocksDB checkpoint offset %s",
-                    state.topic,
-                    state.partition,
-                    state.next_offset,
+                    state.topic, state.partition, state.next_offset,
                 )
             partitions_to_assign.append(partition)
         consumer.assign(partitions_to_assign)
 
     def _on_revoke(self, consumer: Consumer, partitions: list[TopicPartition]) -> None:
-        """Rebalance 正常撤銷 partition 前呼叫：強制 flush 未提交狀態，並清除這些 partition 的 pending 與 active state。"""
+        """Rebalance 正常撤銷 partition 前：強制 flush，清除 pending 與 active state。"""
         LOGGER.debug("Partitions revoked: %s", partitions)
         self._flush(force=True)
         for partition in partitions:
@@ -222,14 +342,14 @@ class CheckpointedConsumer:
             self._active_states.pop((partition.topic, partition.partition), None)
 
     def _on_lost(self, consumer: Consumer, partitions: list[TopicPartition]) -> None:
-        """Rebalance 異常導致 partition 被強制收回時呼叫：直接丟棄 pending 與 active state，不嘗試 flush（避免重複寫入）。"""
+        """Rebalance 異常強制收回：直接丟棄 pending 與 active state，不嘗試 flush。"""
         LOGGER.warning("Partitions lost before revoke completed: %s", partitions)
         for partition in partitions:
             self._pending.pop((partition.topic, partition.partition), None)
             self._active_states.pop((partition.topic, partition.partition), None)
 
     def _install_signal_handlers(self) -> None:
-        """註冊 SIGINT 與 SIGTERM 信號處理器，收到信號時將 _running 設為 False 以優雅停止主迴圈。"""
+        """SIGINT / SIGTERM → _running=False，優雅停止主迴圈。"""
         def stop(*_: object) -> None:
             self._running = False
 

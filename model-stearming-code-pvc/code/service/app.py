@@ -4,10 +4,10 @@ import importlib
 import logging
 import os
 import time
-from types import ModuleType
 from typing import Any
 
 from common.base import (
+    BatchProcessorProtocol,
     ContactPolicyProtocol,
     DataHandleAfterProtocol,
     DataHandleBeforeProtocol,
@@ -54,6 +54,9 @@ def main() -> None:
         raise RuntimeError("CONSUMER_PROCESS environment variable is required (e.g. SL0001)")
 
     processor: ProcessorProtocol = _load_required(process_name, "processing", "process_record")
+    batch_processor: BatchProcessorProtocol | None = _load_optional(
+        process_name, "processing", "process_batch"
+    )
     data_handle_before: DataHandleBeforeProtocol | None = _load_optional(
         process_name, "data_handle_before", "data_handle_before"
     )
@@ -62,9 +65,12 @@ def main() -> None:
     )
     data_handle_after: DataHandleAfterProtocol = _load_data_handle_after(process_name)
 
-    logging.getLogger(__name__).info(
-        "Loaded modules for %s — data_handle_before=%s contact_policy=%s data_handle_after=%s",
+    logger = logging.getLogger(__name__)
+    logger.info(
+        "Loaded modules for %s — batch_processor=%s data_handle_before=%s "
+        "contact_policy=%s data_handle_after=%s",
         process_name,
+        batch_processor is not None,
         data_handle_before is not None,
         contact_policy is not None,
         getattr(data_handle_after, "__module__", "?"),
@@ -74,6 +80,7 @@ def main() -> None:
     CheckpointedConsumer(
         config,
         processor,
+        batch_processor=batch_processor,
         data_handle_before=data_handle_before,
         contact_policy=contact_policy,
         data_handle_after=data_handle_after,

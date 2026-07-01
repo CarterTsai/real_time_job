@@ -17,7 +17,9 @@ def process_record(
     previous_state: dict[str, Any] | None,
     join_data: dict[str, Any],
 ) -> dict[str, Any]:
-    """Model 推論：接收 data_handle_before 組裝的 join_data，呼叫 Model 並回傳結果。"""
+    """單筆 Model 推論：接收 data_handle_before 組裝的 join_data，回傳 model_result。
+    BATCH_SIZE=1 或 process_batch 未實作時由 consumer 呼叫。
+    """
     scenario = os.environ.get("CONSUMER_PROCESS", "SK0002")
     uid = join_data.get("uid", "")
     cust_id = join_data.get("cust_id", "")
@@ -41,3 +43,14 @@ def process_record(
         "model_id": model_id,
         "model_score": model_score,
     }
+
+
+def process_batch(*, batch: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """批次 Model 推論：BATCH_SIZE > 1 且此 function 存在時，consumer 改用批次呼叫。
+    TODO: 替換為實際支援 batch inference 的 Model API。
+    """
+    scenario = os.environ.get("CONSUMER_PROCESS", "SK0002")
+    LOGGER.info("[%s][process_batch] batch_size=%d", scenario, len(batch))
+
+    # TODO: 呼叫 batch Model API，下方為 fallback（逐筆呼叫）
+    return [process_record(**item) for item in batch]

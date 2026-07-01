@@ -33,6 +33,17 @@ class ProcessorProtocol(Protocol):
     # returns model_result
 
 
+class BatchProcessorProtocol(Protocol):
+    def __call__(
+        self,
+        *,
+        batch: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]: ...
+    # batch items: {topic, partition, offset, key, value, previous_state, join_data}
+    # returns list of model_results, 順序與 batch 相同
+    # 有此 Protocol 實作時，consumer 改用批次推論取代逐筆呼叫 ProcessorProtocol
+
+
 class ContactPolicyProtocol(Protocol):
     def __call__(
         self,

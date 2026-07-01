@@ -24,6 +24,7 @@ class AppConfig:
     checkpoint_every_seconds: float
     commit_kafka_offsets: bool
     poll_timeout_seconds: float
+    batch_size: int
 
     @classmethod
     def from_env(cls) -> "AppConfig":
@@ -45,4 +46,5 @@ class AppConfig:
             checkpoint_every_seconds=float(os.getenv("CHECKPOINT_EVERY_SECONDS", "5")),
             commit_kafka_offsets=_env_bool("COMMIT_KAFKA_OFFSETS", False),
             poll_timeout_seconds=float(os.getenv("POLL_TIMEOUT_SECONDS", "1.0")),
+            batch_size=int(os.getenv("BATCH_SIZE", "1")),
         )

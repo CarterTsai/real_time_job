@@ -165,6 +165,74 @@ consumer.close()  +  store.close()
 
 ---
 
+## 批次並行處理（Batch + Concurrent）
+
+`BATCH_SIZE > 1` 時啟用，consumer 改用 `consume(num_messages=BATCH_SIZE)` 一次抓多筆，再以三個 Phase 處理：
+
+### 執行流程
+
+```
+consume(BATCH_SIZE=5) → 取得 5 筆訊息
+    │
+    ▼ 按 (topic, partition) 分組
+    │
+    ├─ Partition 0：[msg0, msg1, msg2] ──────┐
+    │                                        │ ThreadPoolExecutor
+    └─ Partition 1：[msg3, msg4] ────────────┘ （同時執行）
+         │
+         ▼ 每個 partition 各自執行三 Phase
+         │
+Phase 1  data_handle_before（循序）
+         逐筆讀 previous_state → 靜態條件檢核 → 組裝 join_data
+         │
+         ▼ 收集所有 valid join_data
+         │
+Phase 2  process_batch / process_record（批次 Model 推論）
+         ┌─ 有 process_batch → 一次送全部 valid 訊息給 Model
+         └─ 無 process_batch → 逐筆呼叫 process_record（fallback）
+         │
+         ▼ 得到 model_results list
+         │
+Phase 3  contact_policy + data_handle_after（循序，含 skipped 訊息）
+         依原始訊息順序逐筆處理，每筆重新讀 latest_prev：
+         ├─ skipped → store_pending(latest_prev)
+         ├─ contact_policy=False → store_pending(latest_prev)
+         └─ 推播 → data_handle_after(latest_prev) → store_pending(new_state)
+```
+
+### 設計說明
+
+| 項目 | 說明 |
+|------|------|
+| **partition 間並行** | 不同 partition 的三個 Phase 由 ThreadPoolExecutor 同時執行，互不干擾（state key 獨立） |
+| **partition 內批次** | Phase 2 將同一 partition 的 valid 訊息打包送 Model，減少推論 RTT |
+| **Phase 3 重新讀 latest_prev** | 確保 `processed_count` 等計數在同一 batch 內正確累積（非全部看相同的初始 state） |
+| **skipped / blocked 訊息也進 Phase 3** | 確保每筆訊息的 offset 都往前推進，不遺漏任何 offset |
+| **Lock** | `_pending` / `_active_states` / `_records_since_flush` 以 `threading.Lock` 保護並行寫入 |
+| **BATCH_SIZE=1（預設）** | 退化為單筆循序處理，行為與原本相同，不影響現有部署 |
+
+### Phase 1 的 previous_state 限制
+
+Phase 1 的 `data_handle_before` 對 batch 內第 N 筆訊息，讀到的是**進入本 batch 前**的 state（非前 N-1 筆的結果），因為前面訊息的 model_result 要等到 Phase 2 才算出來。
+
+**影響範圍**：若 `data_handle_before` 需要上一筆的輸出才能判斷（例如累積計數），在 batch 內會看到相同的初始值。**目前的實作中 `data_handle_before` 僅依賴 Kafka 訊息本身與靜態名單（不依賴 previous_state），此限制無影響。**
+
+### 新增 process_batch
+
+在 `processing.py` 中新增 `process_batch` function，consumer 啟動時自動偵測並啟用批次推論：
+
+```python
+def process_batch(*, batch: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    # batch items 格式：{topic, partition, offset, key, value, previous_state, join_data}
+    # 回傳 list[model_result]，順序須與 batch 相同
+    # 實際呼叫支援 batch 的 Model API：
+    #   responses = model_client.batch_predict([item["join_data"] for item in batch])
+    #   return responses
+    return [process_record(**item) for item in batch]  # fallback
+```
+
+---
+
 ## 架構重點
 
 RocksDB 在這裡負責：
@@ -247,6 +315,7 @@ python -m service.app
 | `CHECKPOINT_EVERY_SECONDS` | 每幾秒 flush 一次 | `5` |
 | `COMMIT_KAFKA_OFFSETS` | 是否同步手動 commit Kafka offset | `false` |
 | `POLL_TIMEOUT_SECONDS` | Kafka poll 等待時間 | `1.0` |
+| `BATCH_SIZE` | 每次 consume 的最大訊息數（批次並行處理） | `1` |
 
 各 process 可在自己的 `processing.py` 內讀取專屬環境變數。
 
