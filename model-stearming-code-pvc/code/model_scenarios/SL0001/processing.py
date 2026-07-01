@@ -1,11 +1,8 @@
 from __future__ import annotations
 
-import hashlib
-import json
 import logging
-from typing import Any
 import os
-import uuid
+from typing import Any
 
 LOGGER = logging.getLogger(__name__)
 
@@ -18,41 +15,29 @@ def process_record(
     key: bytes | None,
     value: bytes | None,
     previous_state: dict[str, Any] | None,
+    join_data: dict[str, Any],
 ) -> dict[str, Any]:
-    previous_count = int((previous_state or {}).get("processed_count", 0))
-    value_digest = hashlib.sha256(value or b"").hexdigest()
-    scenario = os.environ.get("CONSUMER_PROCESS")   
-    uid = str(uuid.uuid4())
+    """Model 推論：接收 data_handle_before 組裝的 join_data，呼叫 Model 並回傳結果。"""
+    scenario = os.environ.get("CONSUMER_PROCESS", "SL0001")
+    uid = join_data.get("uid", "")
+    cust_id = join_data.get("cust_id", "")
+    decoded_value = join_data.get("decoded_value", {})
 
-    try:
-        LOGGER.info("[{scenario}][{uid}][]--[即時資料][kfk] 取得信卡交易資料")
-        decoded_value = json.loads((value or b"{}").decode("utf-8"))
-        cust_id = decoded_value.get("ACID")
-        LOGGER.info(f"[{scenario}][{uid}][{cust_id}]--[即時資料][kfk] 交易資料 : {decoded_value}")
+    LOGGER.info("[%s][%s][%s]--[Model Function][model] call model", scenario, uid, cust_id)
 
-        LOGGER.info(f"[{scenario}][{uid}][{cust_id}]--[kfk Consumer][靜態條件檢核] 符合可推播名單")
+    # TODO: 實際呼叫 Model
+    model_id = ""
+    model_score = 0.0
 
-        LOGGER.info(f"[{scenario}][{uid}][{cust_id}]--[Model Function][model] call model")
-        LOGGER.info(f"[{scenario}][{uid}][{cust_id}]--[Model Function][model] model回傳結果 : id : , score : ")
-        LOGGER.info(f"[{scenario}][{uid}][{cust_id}]--[Model Function][model] model end")
-
-        LOGGER.info(f"[{scenario}][{uid}][{cust_id}]--[contact檢核][推播檢核] 近2天無推播")
-
-        LOGGER.info(f"[{scenario}][{uid}][{cust_id}]--[推播][寫入推播紀錄] 寫入redis")
-        LOGGER.info(f"[{scenario}][{uid}][{cust_id}]--[推播][寫入推播紀錄] 寫入kfk")
-    except (UnicodeDecodeError, json.JSONDecodeError):
-        decoded_value = {"raw_bytes_length": len(value or b"")}
-
-    LOGGER.info("Processing record %s:%s:%s with key=%s and value=%s", topic, partition, offset, key, decoded_value)
+    LOGGER.info(
+        "[%s][%s][%s]--[Model Function][model] model回傳結果 : id : %s , score : %s",
+        scenario, uid, cust_id, model_id, model_score,
+    )
 
     return {
-        "processed_count": previous_count + 1,
-        "last_seen": {
-            "topic": topic,
-            "partition": partition,
-            "offset": offset,
-            "key": key.decode("utf-8", errors="replace") if key else None,
-            "value_digest": value_digest,
-            "sample": decoded_value,
-        },
+        "uid": uid,
+        "cust_id": cust_id,
+        "decoded_value": decoded_value,
+        "model_id": model_id,
+        "model_score": model_score,
     }

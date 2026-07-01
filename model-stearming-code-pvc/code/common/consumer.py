@@ -8,7 +8,12 @@ from typing import Any
 
 from confluent_kafka import Consumer, KafkaException, Message, TopicPartition
 
-from common.base import ProcessorProtocol
+from common.base import (
+    ContactPolicyProtocol,
+    DataHandleAfterProtocol,
+    DataHandleBeforeProtocol,
+    ProcessorProtocol,
+)
 from common.config import AppConfig
 from common.state import PartitionState, RocksCheckpointStore
 
@@ -24,9 +29,21 @@ class PendingCheckpoint:
 
 
 class CheckpointedConsumer:
-    def __init__(self, config: AppConfig, processor: ProcessorProtocol) -> None:
+    def __init__(
+        self,
+        config: AppConfig,
+        processor: ProcessorProtocol,
+        *,
+        data_handle_before: DataHandleBeforeProtocol | None = None,
+        contact_policy: ContactPolicyProtocol | None = None,
+        data_handle_after: DataHandleAfterProtocol,
+    ) -> None:
         self.config = config
         self._processor = processor
+        self._data_handle_before = data_handle_before
+        self._contact_policy = contact_policy
+        self._data_handle_after = data_handle_after
+
         self.config.rocksdb_path.mkdir(parents=True, exist_ok=True)
         self.store = RocksCheckpointStore(str(self.config.rocksdb_path))
         self.consumer = Consumer(
@@ -73,27 +90,65 @@ class CheckpointedConsumer:
             self.store.close()
 
     def _handle_message(self, message: Message) -> None:
-        """處理單一 Kafka 訊息：呼叫業務邏輯取得中間狀態，並記錄到 pending 等待 flush。"""
-        LOGGER.debug("C_handle_message. message=%s", message)
+        """四步驟編排：data_handle_before → process_record → contact_policy → data_handle_after。
+        任一步驟決定跳過時，仍 commit offset 但保留原 intermediate_state。
+        """
+        LOGGER.debug("_handle_message. message=%s", message)
         topic = message.topic()
         partition = message.partition()
         offset = message.offset()
+        key = message.key()
+        value = message.value()
         state_key = (topic, partition)
-        previous_state = self._pending.get(state_key)
-        previous_intermediate_state = (
-            previous_state.intermediate_state
-            if previous_state is not None
-            else (self._active_states.get(state_key).intermediate_state if state_key in self._active_states else None)
+
+        pending = self._pending.get(state_key)
+        previous_state: dict[str, Any] | None = (
+            pending.intermediate_state
+            if pending is not None
+            else (self._active_states[state_key].intermediate_state if state_key in self._active_states else None)
         )
 
-        intermediate_state = self._processor(
+        base_kwargs: dict[str, Any] = dict(
             topic=topic,
             partition=partition,
             offset=offset,
-            key=message.key(),
-            value=message.value(),
-            previous_state=previous_intermediate_state,
+            key=key,
+            value=value,
+            previous_state=previous_state,
         )
+
+        # Step 1: data_handle_before（optional）— 靜態條件檢核 + 資料 join
+        join_data: dict[str, Any] = {}
+        if self._data_handle_before is not None:
+            should_continue, join_data = self._data_handle_before(**base_kwargs)
+            if not should_continue:
+                LOGGER.debug("data_handle_before skipped. topic=%s partition=%s offset=%s", topic, partition, offset)
+                self._store_pending(state_key, topic, partition, offset, previous_state or {})
+                return
+
+        # Step 2: process_record（required）— Model 推論
+        model_result = self._processor(**base_kwargs, join_data=join_data)
+
+        # Step 3: contact_policy（optional）— 推播頻率檢核
+        if self._contact_policy is not None:
+            should_push = self._contact_policy(**base_kwargs, model_result=model_result)
+            if not should_push:
+                LOGGER.debug("contact_policy blocked push. topic=%s partition=%s offset=%s", topic, partition, offset)
+                self._store_pending(state_key, topic, partition, offset, previous_state or {})
+                return
+
+        # Step 4: data_handle_after（required，scenario 優先，fallback 至 common）— 推播輸出
+        new_state = self._data_handle_after(**base_kwargs, model_result=model_result)
+        self._store_pending(state_key, topic, partition, offset, new_state)
+
+    def _store_pending(
+        self,
+        state_key: tuple[str, int],
+        topic: str,
+        partition: int,
+        offset: int,
+        intermediate_state: dict[str, Any],
+    ) -> None:
         self._pending[state_key] = PendingCheckpoint(
             topic=topic,
             partition=partition,

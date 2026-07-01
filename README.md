@@ -8,6 +8,163 @@
 
 Consumer 會關閉 Kafka `enable.auto.commit`，每筆 Kafka message 處理完成後先暫存在記憶體，並依照「每 N 筆」或「每 X 秒」flush 到 RocksDB。RocksDB checkpoint 內容包含下一次要讀的 offset 和中間狀態。
 
+## Architecture
+
+```mermaid
+flowchart TD
+    ENV["環境變數\nCONSUMER_PROCESS / KAFKA_* / ROCKSDB_*"]
+
+    subgraph Entry["service/app.py — 入口"]
+        APP["main()\n動態 import model_scenarios.{name}.processing"]
+    end
+
+    subgraph Common["common/ — 共用框架層"]
+        CFG["AppConfig\nconfig.py\n從 env 讀取所有設定"]
+        CC["CheckpointedConsumer\nconsumer.py\nKafka poll 主迴圈\n+ pending buffer\n+ flush 排程\n+ rebalance callbacks"]
+        STORE["RocksCheckpointStore\nstate.py\nRocksDB 讀寫封裝\nkey: checkpoint:{topic}:{partition}"]
+        PROTO["ProcessorProtocol\nbase.py\n(Protocol 介面)"]
+    end
+
+    subgraph Scenarios["model_scenarios/ — 業務邏輯層"]
+        SL["SL0001/processing.py\nprocess_record()"]
+        SK["SK0002/processing.py\nprocess_record()"]
+        DOTS["... 新場景 SCxxxxx"]
+    end
+
+    subgraph External["外部系統"]
+        KAFKA["Kafka Broker\nTopic / Partition"]
+        RDB["RocksDB\nPVC Persistent Volume\noffset + intermediate_state"]
+        REDIS["Redis\n(推播紀錄)"]
+        KFKOUT["Kafka\n(推播輸出)"]
+    end
+
+    %% 啟動流程
+    ENV -->|"讀取"| APP
+    APP -->|"建立"| CFG
+    APP -->|"動態載入 process_record"| PROTO
+    PROTO -.->|"實作"| SL
+    PROTO -.->|"實作"| SK
+    PROTO -.->|"實作"| DOTS
+    APP -->|"注入 config + processor\n建立並 .run()"| CC
+    CFG --> CC
+
+    %% 訊息處理主流程
+    KAFKA -->|"poll()"| CC
+    CC -->|"_handle_message()\n呼叫 processor(previous_state)"| PROTO
+    PROTO -->|"回傳 new intermediate_state"| CC
+    CC -->|"存入 _pending buffer"| CC
+
+    %% Flush 流程（每 N 筆 or 每 X 秒）
+    CC -->|"_flush()\nsave() + flush_wal()"| STORE
+    STORE -->|"讀寫"| RDB
+
+    %% Rebalance
+    KAFKA -->|"rebalance on_assign"| CC
+    CC -->|"load() → seek offset"| STORE
+
+    %% 業務場景外部呼叫（processing.py 內部）
+    SL -->|"寫入推播紀錄"| REDIS
+    SL -->|"寫入推播紀錄"| KFKOUT
+    SK -->|"寫入推播紀錄"| REDIS
+    SK -->|"寫入推播紀錄"| KFKOUT
+```
+
+### 文字流程說明
+
+**① 啟動流程**
+
+```
+環境變數 (CONSUMER_PROCESS=SL0001, KAFKA_*, ROCKSDB_*)
+    │
+    ▼
+service/app.py  main()
+    ├─ AppConfig.from_env()          ← 讀取所有 Kafka / RocksDB 設定
+    ├─ import model_scenarios.SL0001.processing.process_record
+    └─ CheckpointedConsumer(config, processor).run()
+            │
+            ▼
+        consumer.subscribe(topics)   ← 加入 Kafka Consumer Group
+```
+
+**② 訊息消費主流程**
+
+```
+Kafka Topic / Partition
+    │
+    │  poll()  每 1 秒
+    ▼
+CheckpointedConsumer._handle_message()   ← 共用框架層
+    │
+    │  呼叫 data_handle_before(previous_state)
+    ▼
+model_scenarios/{name}/data_handle_before.py     ← 資料前置業務邏輯層
+    ├─ 靜態條件檢核
+    ├─ 呼叫 process_record(previous_state, join_data)
+    ▼
+model_scenarios/{name}/processing.py     ← Model業務邏輯層
+    ├─ 呼叫 Model
+    ▼
+model_scenarios/{name}/contact_policy.py    ← contact 推播頻率檢核邏輯層
+    ├─ 近 2 天無推播檢核
+    ▼
+model_scenarios/{name}/data_handle_after.py    ← Redis寫入/Kafka推播輸出邏輯層
+    ├─ 寫入 Redis / Kafka (推播輸出)
+    └─ 回傳 new_intermediate_state
+    ▼
+_pending buffer (記憶體暫存)
+    │
+    │  每 N 筆 或 每 X 秒 → _flush()
+    ▼
+RocksCheckpointStore.save()              ← 共用框架層
+    │
+    ▼
+RocksDB / PVC  (checkpoint:{topic}:{partition})
+```
+
+> **data_handle_after.py 載入規則**
+> `data_handle_after.py` 採 fallback 設計：若 `model_scenarios/{name}/` 下有此檔案則優先使用（scenario 自訂邏輯）；否則 fallback 至 `common/data_handle_after.py`（預設實作，支援 Kafka 與 MongoDB 輸出）。
+
+**③ Rebalance 流程**
+
+```
+Kafka Rebalance 事件
+    │
+    ├─ on_assign  → RocksDB.load()  → consumer.seek(上次 checkpoint offset)
+    │                                                  │
+    │                                                  ▼
+    │                                          Kafka Topic (從斷點續讀)
+    │
+    └─ on_revoke  → _flush(force=True) → 清除 pending / active state
+```
+
+**④ 停止流程**
+
+```
+SIGINT / SIGTERM
+    │
+    ▼
+_running = False
+    │
+    ▼
+_flush(force=True)   ← 確保未提交狀態寫入 RocksDB
+    │
+    ▼
+consumer.close()  +  store.close()
+```
+
+### 關鍵資料流
+
+| 階段 | 流程 |
+|------|------|
+| **啟動** | `app.py` 讀 `CONSUMER_PROCESS` → 動態 import `process_record` → 建立 `AppConfig` + `CheckpointedConsumer` |
+| **消費訊息** | Kafka `poll()` → `_handle_message()` → 呼叫 `process_record(previous_state)` → 存入 `_pending` |
+| **Flush** | 達到 N 筆或 X 秒 → `_flush()` → `RocksCheckpointStore.save()` → RocksDB flush WAL |
+| **Rebalance Assign** | `_on_assign()` → 從 RocksDB `load()` checkpoint → `seek` 到上次 offset |
+| **Rebalance Revoke** | `_on_revoke()` → 強制 `_flush(force=True)` → 清除 pending / active state |
+| **優雅停止** | SIGINT/SIGTERM → `_running=False` → 最終 `_flush(force=True)` → `consumer.close()` + `store.close()` |
+
+---
+
 ## 架構重點
 
 RocksDB 在這裡負責：
@@ -29,23 +186,28 @@ RocksDB 在這裡負責：
 ## 專案結構
 
 ```
-model-stearming-code-pvc/code/       # container 內掛載至 /app
-├── common/                           # 共用框架層
-│   ├── base.py                       # ProcessorProtocol 介面定義
-│   ├── config.py                     # Kafka / RocksDB 設定（從環境變數讀取）
-│   ├── consumer.py                   # Kafka poll + RocksDB checkpoint 核心邏輯
-│   └── state.py                      # RocksDB state store（PartitionState / RocksCheckpointStore）
+model-stearming-code-pvc/code/            # container 內掛載至 /app
+├── common/                               # 共用框架層
+│   ├── base.py                           # ProcessorProtocol 介面定義
+│   ├── config.py                         # Kafka / RocksDB 設定（從環境變數讀取）
+│   ├── consumer.py                       # Kafka poll + RocksDB checkpoint 核心邏輯
+│   ├── state.py                          # RocksDB state store（PartitionState / RocksCheckpointStore）
+│   └── data_handle_after.py              # 預設推播輸出（支援 Kafka / MongoDB）
 │
-├── service/                          # 服務啟動層
-│   └── app.py                        # 入口：讀 CONSUMER_PROCESS 動態載入對應 processing
+├── service/                              # 服務啟動層
+│   └── app.py                            # 入口：讀 CONSUMER_PROCESS 動態載入對應 processing
 │
-└── model_scenarios/                  # 各業務場景（每個目錄為獨立專案）
+└── model_scenarios/                      # 各業務場景（每個目錄為獨立專案）
     ├── SL0001/
-    │   └── processing.py             # 信用卡即時推播邏輯，實作 ProcessorProtocol
-    └── streaming/
-        └── SCXXXXX/                  # 新場景範本（複製此目錄作為起點）
-            ├── app.py
-            └── processing.py
+    │   ├── processing.py                 # Model 推論邏輯，實作 ProcessorProtocol
+    │   ├── data_handle_before.py         # (optional) 靜態條件檢核 + 資料 join
+    │   ├── contact_policy.py             # (optional) 推播頻率檢核（近 2 天）
+    │   └── data_handle_after.py          # (optional) 覆寫預設推播輸出
+    └── SCXXXXX/                          # 新場景範本（複製此目錄作為起點）
+        ├── processing.py                 # Model 推論邏輯（必填）
+        ├── data_handle_before.py         # (optional) 靜態條件檢核 + 資料 join
+        ├── contact_policy.py             # (optional) 推播頻率檢核
+        └── data_handle_after.py          # (optional) 覆寫預設推播輸出
 ```
 
 ## 安裝（本機開發）
